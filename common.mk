@@ -18,13 +18,15 @@ OPTEE_TEST_PATH			?= $(ROOT)/optee_test
 OPTEE_TEST_OUT_PATH		?= $(ROOT)/optee_test/out
 OPTEE_EXAMPLES_PATH		?= $(ROOT)/optee_examples
 BENCHMARK_APP_PATH		?= $(ROOT)/optee_benchmark
-LIBYAML_LIB_PATH		?= $(BENCHMARK_APP_PATH)/libyaml/out/lib
+BENCHMARK_APP_OUT		?= $(BENCHMARK_APP_PATH)/out
+LIBYAML_LIB_OUT			?= $(BENCHMARK_APP_OUT)/libyaml/out/lib
+BUILDROOT_TARGET_ROOT		?= $(ROOT)/out-br/target
 
 # default high verbosity. slow uarts shall specify lower if prefered
 CFG_TEE_CORE_LOG_LEVEL		?= 3
 
 # default disable latency benchmarks (over all OP-TEE layers)
-CFG_TEE_BENCHMARK			?= n
+CFG_TEE_BENCHMARK		?= n
 
 CCACHE ?= $(shell which ccache) # Don't remove this comment (space is needed)
 
@@ -108,10 +110,19 @@ endif
 ################################################################################
 # set the compiler when COMPILE_xxx are defined
 ################################################################################
+
+
+ifeq ($(COMPILE_LEGACY),)
 CROSS_COMPILE_NS_USER   ?= "$(CCACHE)$(AARCH$(COMPILE_NS_USER)_CROSS_COMPILE)"
 CROSS_COMPILE_NS_KERNEL ?= "$(CCACHE)$(AARCH$(COMPILE_NS_KERNEL)_CROSS_COMPILE)"
 CROSS_COMPILE_S_USER    ?= "$(CCACHE)$(AARCH$(COMPILE_S_USER)_CROSS_COMPILE)"
 CROSS_COMPILE_S_KERNEL  ?= "$(CCACHE)$(AARCH$(COMPILE_S_KERNEL)_CROSS_COMPILE)"
+else
+CROSS_COMPILE_NS_USER   ?= "$(CCACHE)$(LEGACY_AARCH$(COMPILE_NS_USER)_CROSS_COMPILE)"
+CROSS_COMPILE_NS_KERNEL ?= "$(CCACHE)$(LEGACY_AARCH$(COMPILE_NS_KERNEL)_CROSS_COMPILE)"
+CROSS_COMPILE_S_USER    ?= "$(CCACHE)$(LEGACY_AARCH$(COMPILE_S_USER)_CROSS_COMPILE)"
+CROSS_COMPILE_S_KERNEL  ?= "$(CCACHE)$(LEGACY_AARCH$(COMPILE_S_KERNEL)_CROSS_COMPILE)"
+endif
 
 ifeq ($(COMPILE_S_USER),32)
 OPTEE_OS_TA_DEV_KIT_DIR	?= $(OPTEE_OS_PATH)/out/arm/export-ta_arm32
@@ -170,6 +181,67 @@ busybox-clean-common:
 busybox-cleaner-common:
 	rm -rf $(GEN_ROOTFS_PATH)/build
 	rm -rf $(GEN_ROOTFS_PATH)/filelist-final.txt
+
+################################################################################
+# Build root
+################################################################################
+BUILDROOT_ARCH=aarch$(COMPILE_NS_USER)
+ifeq ($(COMPILE_LEGACY),)
+BUILDROOT_TOOLCHAIN=toolchain-aarch$(COMPILE_NS_USER)
+else
+BUILDROOT_TOOLCHAIN=toolchain-aarch$(COMPILE_NS_USER)-legacy
+endif
+BUILDROOT_GETTY_PORT ?= \
+	$(if $(CFG_NW_CONSOLE_UART),ttyAMA$(CFG_NW_CONSOLE_UART),ttyAMA0)
+.PHONY: buildroot
+buildroot: optee-os
+	@mkdir -p ../out-br
+	@rm -f ../out-br/build/optee_*/.stamp_*
+	@rm -f ../out-br/extra.conf
+	@touch ../out-br/extra.conf
+	@echo "BR2_TARGET_GENERIC_GETTY_PORT=\"$(BUILDROOT_GETTY_PORT)\"" >> \
+		../out-br/extra.conf
+	@echo "BR2_PACKAGE_OPTEE_TEST_CROSS_COMPILE=\"$(CROSS_COMPILE_S_USER)\"" >> \
+		../out-br/extra.conf
+	@echo "BR2_PACKAGE_OPTEE_EXAMPLES_CROSS_COMPILE=\"$(CROSS_COMPILE_S_USER)\"" >> \
+		../out-br/extra.conf
+	@echo "BR2_PACKAGE_OPTEE_TEST_SDK=\"$(OPTEE_OS_TA_DEV_KIT_DIR)\"" >> \
+		../out-br/extra.conf
+	@echo "BR2_PACKAGE_OPTEE_EXAMPLES_SDK=\"$(OPTEE_OS_TA_DEV_KIT_DIR)\"" >> \
+		../out-br/extra.conf
+	@echo "BR2_PACKAGE_OPTEE_CLIENT_SITE=\"$(OPTEE_CLIENT_PATH)\"" >> \
+		../out-br/extra.conf
+	@echo "BR2_PACKAGE_OPTEE_TEST_SITE=\"$(OPTEE_TEST_PATH)\"" >> \
+		../out-br/extra.conf
+	@echo "BR2_PACKAGE_OPTEE_EXAMPLES_SITE=\"$(OPTEE_EXAMPLES_PATH)\"" >> \
+		../out-br/extra.conf
+	@echo "BR2_PACKAGE_OPTEE_BENCHMARK_SITE=\"$(BENCHMARK_APP_PATH)\"" >> \
+		../out-br/extra.conf
+	@echo "BR2_PACKAGE_OPTEE_TEST=y" >> ../out-br/extra.conf
+	@echo "BR2_PACKAGE_OPTEE_EXAMPLES=y" >> ../out-br/extra.conf
+	@echo "BR2_PACKAGE_STRACE=y" >> ../out-br/extra.conf
+ifeq ($(CFG_TEE_BENCHMARK),y)
+	@echo "BR2_PACKAGE_OPTEE_BENCHMARK=y" >> ../out-br/extra.conf
+endif
+	@echo "BR2_PACKAGE_OPENSSL=y" >> ../out-br/extra.conf
+	@echo "BR2_PACKAGE_LIBOPENSSL=y" >> ../out-br/extra.conf
+	@(cd .. && python build/br-ext/scripts/make_def_config.py \
+		--br buildroot --out out-br --br-ext build/br-ext \
+		--top-dir "$(ROOT)" \
+		--br-defconfig build/br-ext/configs/optee_$(BUILDROOT_ARCH) \
+		--br-defconfig build/br-ext/configs/optee_generic \
+		--br-defconfig build/br-ext/configs/$(BUILDROOT_TOOLCHAIN) \
+		--br-defconfig out-br/extra.conf \
+		--make-cmd $(MAKE))
+	@$(MAKE) -C ../out-br all
+
+.PHONY: buildroot-clean
+buildroot-clean:
+	@test ! -d $(ROOT)/out-br || $(MAKE) -C $(ROOT)/out-br clean
+
+.PHONY: buildroot-cleaner
+buildroot-cleaner:
+	@rm -rf $(ROOT)/out-br
 
 ################################################################################
 # Linux
@@ -305,7 +377,7 @@ OPTEE_OS_CLEAN_COMMON_FLAGS ?= $(OPTEE_OS_COMMON_EXTRA_FLAGS)
 ifeq ($(CFG_TEE_BENCHMARK),y)
 optee-os-clean-common: benchmark-app-clean-common
 endif
-optee-os-clean-common: xtest-clean optee-examples-clean
+optee-os-clean-common: xtest-clean-common optee-examples-clean-common
 	$(MAKE) -C $(OPTEE_OS_PATH) $(OPTEE_OS_CLEAN_COMMON_FLAGS) clean
 
 OPTEE_CLIENT_COMMON_FLAGS ?= CROSS_COMPILE=$(CROSS_COMPILE_NS_USER) \
@@ -429,12 +501,12 @@ filelist-tee-common: optee-client xtest optee-examples
 	@find $(OPTEE_TEST_OUT_PATH) -name "*.ta" | \
 		sed 's/\(.*\)\/\(.*\)/file \/lib\/optee_armtz\/\2 \1\/\2 444 0 0/g' \
 									>> $(fl)
-	@if [ -e $(BENCHMARK_APP_PATH)/benchmark ]; then \
+	@if [ -e $(BENCHMARK_APP_OUT)/benchmark ]; then \
 		echo "file /bin/benchmark" \
-			"$(BENCHMARK_APP_PATH)/benchmark 755 0 0"	>> $(fl); \
+			"$(BENCHMARK_APP_OUT)/benchmark 755 0 0"	>> $(fl); \
 		echo "slink /lib/libyaml-0.so.2 libyaml-0.so.2.0.5 755 0 0" \
 									>> $(fl); \
-		echo "file /lib/libyaml-0.so.2.0.5 $(LIBYAML_LIB_PATH)/libyaml-0.so.2.0.5 755 0 0" \
+		echo "file /lib/libyaml-0.so.2.0.5 $(LIBYAML_LIB_OUT)/libyaml-0.so.2.0.5 755 0 0" \
 									>> $(fl); \
 	fi
 	@if [ "$(QEMU_USERNET_ENABLE)" = "y" ]; then \
